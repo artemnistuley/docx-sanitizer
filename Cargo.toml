@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Structure-preserving sanitization tool for DOCX files"
 license = "MIT"
+repository = "https://github.com/artemnistuley/docx-sanitizer/"
+keywords = ["docx", "ooxml", "sanitize", "redact", "privacy"]
+categories = ["command-line-utilities"]
+exclude = ["tests/fixtures/*.docx"]
 
 [[bin]]
 name = "docx-sanitizer"
