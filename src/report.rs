@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use crate::part::{ClassifiedPart, PartKind, SupportTier};
 use crate::policy::{SanitizeMode, Scope, ScopeCategory, should_block};
+use crate::xml::media::placeholder_bytes_for;
 
 /// A payload surface that could not be confidently classified or rewritten
 /// (e.g. an unrecognized `w:instrText` field instruction pattern).
@@ -39,6 +40,11 @@ pub enum PartStatus {
     Passthrough,
     /// An unsupported-tier part class (`CustomXml`, `Media`, `Embedding`).
     Unsupported,
+    /// A `Media` part whose bytes were replaced with a fixed placeholder
+    /// image, per `--strip-media` (see [`crate::xml::media`]). Distinct from
+    /// `Sanitized` since this isn't payload-preserving-shape rewriting --
+    /// the original image content is fully replaced, not edited in place.
+    Placeholder,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -72,11 +78,15 @@ pub struct Report {
 }
 
 /// Assemble a [`Report`] from already-computed classification and concerns.
+/// `strip_media` must match the value passed to sanitization for `parts`'
+/// statuses to accurately reflect which `Media` parts became placeholders
+/// (see [`PartStatus::Placeholder`]).
 pub fn build_report(
     mode: SanitizeMode,
     scope: &Scope,
     parts: &[ClassifiedPart],
     concerns: &[UnsupportedPayload],
+    strip_media: bool,
 ) -> Report {
     let outcome = if should_block(mode, concerns) {
         SanitizeOutcome::Blocked
@@ -90,7 +100,7 @@ pub fn build_report(
             path: part.path.clone(),
             kind: part.kind.to_string(),
             tier: part.tier.to_string(),
-            status: part_status(part, scope),
+            status: part_status(part, scope, strip_media),
         })
         .collect();
 
@@ -102,7 +112,11 @@ pub fn build_report(
     }
 }
 
-fn part_status(part: &ClassifiedPart, scope: &Scope) -> PartStatus {
+fn part_status(part: &ClassifiedPart, scope: &Scope, strip_media: bool) -> PartStatus {
+    if part.kind == PartKind::Media && strip_media && placeholder_bytes_for(&part.path).is_some() {
+        return PartStatus::Placeholder;
+    }
+
     match part.tier {
         SupportTier::Unsupported => PartStatus::Unsupported,
         SupportTier::BestEffort => PartStatus::Passthrough,
@@ -146,7 +160,7 @@ mod tests {
     #[test]
     fn main_document_is_always_sanitized() {
         let parts = vec![part("word/document.xml", PartKind::MainDocument, SupportTier::Guaranteed)];
-        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[]);
+        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[], false);
         assert_eq!(report.parts[0].status, PartStatus::Sanitized);
     }
 
@@ -154,28 +168,49 @@ mod tests {
     fn excluded_guaranteed_part_is_passthrough() {
         let parts = vec![part("word/header1.xml", PartKind::Header(1), SupportTier::Guaranteed)];
         let scope = Scope::parse_exclude("headers").unwrap();
-        let report = build_report(SanitizeMode::Strict, &scope, &parts, &[]);
+        let report = build_report(SanitizeMode::Strict, &scope, &parts, &[], false);
         assert_eq!(report.parts[0].status, PartStatus::Passthrough);
     }
 
     #[test]
     fn included_guaranteed_part_is_sanitized() {
         let parts = vec![part("word/header1.xml", PartKind::Header(1), SupportTier::Guaranteed)];
-        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[]);
+        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[], false);
         assert_eq!(report.parts[0].status, PartStatus::Sanitized);
     }
 
     #[test]
     fn best_effort_tier_part_is_passthrough() {
         let parts = vec![part("word/styles.xml", PartKind::Other, SupportTier::BestEffort)];
-        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[]);
+        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[], false);
         assert_eq!(report.parts[0].status, PartStatus::Passthrough);
     }
 
     #[test]
     fn unsupported_tier_part_is_unsupported() {
         let parts = vec![part("customXml/item1.xml", PartKind::CustomXml, SupportTier::Unsupported)];
-        let report = build_report(SanitizeMode::BestEffort, &Scope::all(), &parts, &[]);
+        let report = build_report(SanitizeMode::BestEffort, &Scope::all(), &parts, &[], false);
+        assert_eq!(report.parts[0].status, PartStatus::Unsupported);
+    }
+
+    #[test]
+    fn media_with_strip_media_and_supported_extension_is_placeholder() {
+        let parts = vec![part("word/media/image1.png", PartKind::Media, SupportTier::Unsupported)];
+        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[], true);
+        assert_eq!(report.parts[0].status, PartStatus::Placeholder);
+    }
+
+    #[test]
+    fn media_without_strip_media_stays_unsupported() {
+        let parts = vec![part("word/media/image1.png", PartKind::Media, SupportTier::Unsupported)];
+        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[], false);
+        assert_eq!(report.parts[0].status, PartStatus::Unsupported);
+    }
+
+    #[test]
+    fn media_with_strip_media_but_unsupported_extension_stays_unsupported() {
+        let parts = vec![part("word/media/image1.emf", PartKind::Media, SupportTier::Unsupported)];
+        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[], true);
         assert_eq!(report.parts[0].status, PartStatus::Unsupported);
     }
 
@@ -185,7 +220,7 @@ mod tests {
             part: "customXml/item1.xml".to_string(),
             description: "unsupported part class: CustomXml".to_string(),
         }];
-        let report = build_report(SanitizeMode::Strict, &Scope::all(), &[], &concerns);
+        let report = build_report(SanitizeMode::Strict, &Scope::all(), &[], &concerns, false);
         assert_eq!(report.outcome, SanitizeOutcome::Blocked);
         assert_eq!(report.concerns.len(), 1);
     }
@@ -196,20 +231,20 @@ mod tests {
             part: "customXml/item1.xml".to_string(),
             description: "unsupported part class: CustomXml".to_string(),
         }];
-        let report = build_report(SanitizeMode::BestEffort, &Scope::all(), &[], &concerns);
+        let report = build_report(SanitizeMode::BestEffort, &Scope::all(), &[], &concerns, false);
         assert_eq!(report.outcome, SanitizeOutcome::Sanitized);
     }
 
     #[test]
     fn outcome_is_sanitized_with_no_concerns() {
-        let report = build_report(SanitizeMode::Strict, &Scope::all(), &[], &[]);
+        let report = build_report(SanitizeMode::Strict, &Scope::all(), &[], &[], false);
         assert_eq!(report.outcome, SanitizeOutcome::Sanitized);
     }
 
     #[test]
     fn serializes_to_expected_json_shape() {
         let parts = vec![part("word/document.xml", PartKind::MainDocument, SupportTier::Guaranteed)];
-        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[]);
+        let report = build_report(SanitizeMode::Strict, &Scope::all(), &parts, &[], false);
         let json = serde_json::to_value(&report).unwrap();
 
         assert_eq!(json["mode"], "strict");

@@ -38,6 +38,7 @@ use crate::policy::{SanitizeMode, Scope, ScopeCategory, collect_concerns, should
 use crate::relationships::Relationships;
 use crate::report::{Report, UnsupportedPayload, build_report};
 use crate::xml::instr_text::sanitize_instr_text_elements;
+use crate::xml::media::placeholder_bytes_for;
 use crate::xml::props::{sanitize_app_props_xml, sanitize_core_props_xml, sanitize_custom_props_xml};
 use crate::xml::rels::sanitize_hyperlink_targets;
 use crate::xml::rewrite::{WORDPROCESSINGML_NS, rewrite_attribute_values, rewrite_text_elements};
@@ -81,10 +82,11 @@ pub fn sanitize(
     scope: &Scope,
     replacement_mode: ReplacementMode,
     remove_track_changes: bool,
+    strip_media: bool,
 ) -> Result<SanitizeResult, Error> {
-    let output = sanitize_document_text(files, scope, replacement_mode, remove_track_changes)?;
+    let output = sanitize_document_text(files, scope, replacement_mode, remove_track_changes, strip_media)?;
     let parts = inspect_parts(files)?;
-    let concerns = collect_concerns(&parts, &output.unsupported);
+    let concerns = collect_concerns(&parts, &output.unsupported, strip_media);
 
     if should_block(mode, &concerns) {
         Ok(SanitizeResult::Blocked { concerns })
@@ -108,11 +110,12 @@ pub fn report(
     scope: &Scope,
     replacement_mode: ReplacementMode,
     remove_track_changes: bool,
+    strip_media: bool,
 ) -> Result<Report, Error> {
-    let output = sanitize_document_text(files, scope, replacement_mode, remove_track_changes)?;
+    let output = sanitize_document_text(files, scope, replacement_mode, remove_track_changes, strip_media)?;
     let parts = inspect_parts(files)?;
-    let concerns = collect_concerns(&parts, &output.unsupported);
-    Ok(build_report(mode, scope, &parts, &concerns))
+    let concerns = collect_concerns(&parts, &output.unsupported, strip_media);
+    Ok(build_report(mode, scope, &parts, &concerns, strip_media))
 }
 
 /// Sanitize the visible text and revision/comment metadata of
@@ -129,6 +132,7 @@ pub fn sanitize_document_text(
     scope: &Scope,
     replacement_mode: ReplacementMode,
     remove_track_changes: bool,
+    strip_media: bool,
 ) -> Result<SanitizeOutput, Error> {
     let relationships = Relationships::from_files(files)?;
     let main_document_path = relationships
@@ -208,6 +212,22 @@ pub fn sanitize_document_text(
     for (path, xml) in files {
         if path.ends_with(".rels") {
             overrides.insert(path.clone(), sanitize_hyperlink_targets(xml)?);
+        }
+    }
+
+    // `--strip-media`: replace `word/media/*` bytes with a fixed placeholder
+    // image for supported extensions. The part stays at the same path with
+    // the same relationship/content-type entry -- only its payload changes
+    // -- so no `.rels`/`[Content_Types].xml` cleanup is needed (see
+    // DESIGN.md's "Images and Embeddings" for why this is placeholder
+    // replacement, not part removal).
+    if strip_media {
+        for path in files.keys() {
+            if path.starts_with("word/media/")
+                && let Some(placeholder) = placeholder_bytes_for(path)
+            {
+                overrides.insert(path.clone(), placeholder.to_vec());
+            }
         }
     }
 
@@ -327,7 +347,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
 
         let sanitized_document = get_part(&sanitized_files, "word/document.xml").unwrap();
@@ -366,7 +386,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_document = get_part(&sanitized_files, "word/document.xml").unwrap();
 
@@ -397,7 +417,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_document = get_part(&sanitized_files, "word/document.xml").unwrap();
 
@@ -438,7 +458,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
 
         let sanitized_header = get_part(&sanitized_files, "word/header1.xml").unwrap();
@@ -483,7 +503,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
 
         let sanitized_footnotes = get_part(&sanitized_files, "word/footnotes.xml").unwrap();
@@ -524,7 +544,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
 
         let sanitized_comments = get_part(&sanitized_files, "word/comments.xml").unwrap();
@@ -562,7 +582,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_comments = get_part(&sanitized_files, "word/comments.xml").unwrap();
 
@@ -606,7 +626,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
 
         let sanitized_core = get_part(&sanitized_files, "docProps/core.xml").unwrap();
@@ -642,7 +662,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         assert!(output.unsupported.is_empty());
 
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
@@ -676,7 +696,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
 
         assert_eq!(output.unsupported.len(), 1);
         assert_eq!(output.unsupported[0].part, "word/document.xml");
@@ -706,7 +726,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         assert!(output.unsupported.is_empty());
 
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
@@ -731,7 +751,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_document = get_part(&sanitized_files, "word/document.xml").unwrap();
 
@@ -753,7 +773,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let result = sanitize(&files, SanitizeMode::Strict, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let result = sanitize(&files, SanitizeMode::Strict, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
 
         match result {
             SanitizeResult::Blocked { concerns } => {
@@ -784,7 +804,7 @@ mod tests {
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
         let scope = Scope::parse_include("comments").unwrap();
-        let result = sanitize(&files, SanitizeMode::Strict, &scope, ReplacementMode::default(), false).unwrap();
+        let result = sanitize(&files, SanitizeMode::Strict, &scope, ReplacementMode::default(), false, false).unwrap();
 
         match result {
             SanitizeResult::Blocked { concerns } => {
@@ -809,7 +829,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let result = sanitize(&files, SanitizeMode::BestEffort, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let result = sanitize(&files, SanitizeMode::BestEffort, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
 
         match result {
             SanitizeResult::Produced(output) => {
@@ -836,7 +856,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let result = sanitize(&files, SanitizeMode::Strict, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let result = sanitize(&files, SanitizeMode::Strict, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
 
         match result {
             SanitizeResult::Blocked { concerns } => {
@@ -860,7 +880,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let result = sanitize(&files, SanitizeMode::Strict, &Scope::all(), ReplacementMode::default(), false).unwrap();
+        let result = sanitize(&files, SanitizeMode::Strict, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
 
         assert!(matches!(result, SanitizeResult::Produced(_)));
     }
@@ -889,7 +909,7 @@ mod tests {
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
         let scope = Scope::parse_exclude("headers").unwrap();
-        let output = sanitize_document_text(&files, &scope, ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &scope, ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
 
         // Header untouched (excluded)...
@@ -934,7 +954,7 @@ mod tests {
         // Only comments in scope -- docprops must stay untouched even
         // though its part is present.
         let scope = Scope::parse_include("comments").unwrap();
-        let output = sanitize_document_text(&files, &scope, ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &scope, ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
 
         let sanitized_comments = get_part(&sanitized_files, "word/comments.xml").unwrap();
@@ -966,7 +986,7 @@ mod tests {
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
         let scope = Scope::parse_exclude("revisions").unwrap();
-        let output = sanitize_document_text(&files, &scope, ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &scope, ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_document = get_part(&sanitized_files, "word/document.xml").unwrap();
         let sanitized_str = std::str::from_utf8(sanitized_document).unwrap();
@@ -990,7 +1010,7 @@ mod tests {
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
         let output =
-            sanitize_document_text(&files, &Scope::all(), ReplacementMode::Constant, false).unwrap();
+            sanitize_document_text(&files, &Scope::all(), ReplacementMode::Constant, false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_document = get_part(&sanitized_files, "word/document.xml").unwrap();
         let sanitized_str = std::str::from_utf8(sanitized_document).unwrap();
@@ -1017,7 +1037,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::Clear, false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::Clear, false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_document = get_part(&sanitized_files, "word/document.xml").unwrap();
         let sanitized_str = std::str::from_utf8(sanitized_document).unwrap();
@@ -1050,7 +1070,7 @@ mod tests {
         ]);
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
-        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::Clear, false).unwrap();
+        let output = sanitize_document_text(&files, &Scope::all(), ReplacementMode::Clear, false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_core = get_part(&sanitized_files, "docProps/core.xml").unwrap();
 
@@ -1081,7 +1101,7 @@ mod tests {
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
         let output =
-            sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), true).unwrap();
+            sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), true, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_document = get_part(&sanitized_files, "word/document.xml").unwrap();
         let sanitized_str = std::str::from_utf8(sanitized_document).unwrap();
@@ -1117,7 +1137,7 @@ mod tests {
         let files = unpack_docx(Cursor::new(bytes)).unwrap();
 
         let output =
-            sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false).unwrap();
+            sanitize_document_text(&files, &Scope::all(), ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_document = get_part(&sanitized_files, "word/document.xml").unwrap();
         let sanitized_str = std::str::from_utf8(sanitized_document).unwrap();
@@ -1151,7 +1171,7 @@ mod tests {
         // -- it isn't part of the scope vocabulary at all.
         let scope = Scope::parse_exclude("headers,footers,comments,footnotes,endnotes,docprops,revisions")
             .unwrap();
-        let output = sanitize_document_text(&files, &scope, ReplacementMode::default(), false).unwrap();
+        let output = sanitize_document_text(&files, &scope, ReplacementMode::default(), false, false).unwrap();
         let sanitized_files = unpack_docx(Cursor::new(output.bytes)).unwrap();
         let sanitized_rels = get_part(&sanitized_files, "word/_rels/document.xml.rels").unwrap();
         let sanitized_str = std::str::from_utf8(sanitized_rels).unwrap();

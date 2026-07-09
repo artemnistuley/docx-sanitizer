@@ -44,6 +44,13 @@ struct PolicyArgs {
     /// default -- track-changes structure is preserved, per DESIGN.md.
     #[arg(long)]
     remove_track_changes: bool,
+    /// Replace `word/media/*` images with a fixed placeholder instead of
+    /// leaving them as unsupported content. Only png/jpg/jpeg/gif/bmp are
+    /// covered; other formats (e.g. emf/wmf) remain unsupported regardless.
+    /// Works independently of --best-effort: with this flag, strict mode
+    /// no longer blocks on media with a supported extension.
+    #[arg(long)]
+    strip_media: bool,
 }
 
 impl PolicyArgs {
@@ -111,6 +118,7 @@ fn main() -> ExitCode {
                 &scope,
                 replacement_mode,
                 policy.remove_track_changes,
+                policy.strip_media,
                 report_json.as_deref(),
             )
         }
@@ -128,6 +136,7 @@ fn main() -> ExitCode {
                 &scope,
                 replacement_mode,
                 policy.remove_track_changes,
+                policy.strip_media,
                 report_json.as_deref(),
             )
         }
@@ -167,6 +176,7 @@ fn run_sanitize(
     scope: &Scope,
     replacement_mode: ReplacementMode,
     remove_track_changes: bool,
+    strip_media: bool,
     report_json: Option<&std::path::Path>,
 ) -> ExitCode {
     let files = match open_and_unpack(input) {
@@ -178,14 +188,21 @@ fn run_sanitize(
     };
 
     if let Some(path) = report_json
-        && let Err(err) =
-            write_report(&files, mode, scope, replacement_mode, remove_track_changes, Some(path))
-        {
-            eprintln!("error: {err}");
-            return ExitCode::FAILURE;
-        }
+        && let Err(err) = write_report(
+            &files,
+            mode,
+            scope,
+            replacement_mode,
+            remove_track_changes,
+            strip_media,
+            Some(path),
+        )
+    {
+        eprintln!("error: {err}");
+        return ExitCode::FAILURE;
+    }
 
-    let result = match sanitize(&files, mode, scope, replacement_mode, remove_track_changes) {
+    let result = match sanitize(&files, mode, scope, replacement_mode, remove_track_changes, strip_media) {
         Ok(result) => result,
         Err(err) => {
             eprintln!("error: failed to sanitize document: {err}");
@@ -217,12 +234,14 @@ fn run_sanitize(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_report(
     input: &PathBuf,
     mode: SanitizeMode,
     scope: &Scope,
     replacement_mode: ReplacementMode,
     remove_track_changes: bool,
+    strip_media: bool,
     report_json: Option<&std::path::Path>,
 ) -> ExitCode {
     let files = match open_and_unpack(input) {
@@ -233,7 +252,15 @@ fn run_report(
         }
     };
 
-    match write_report(&files, mode, scope, replacement_mode, remove_track_changes, report_json) {
+    match write_report(
+        &files,
+        mode,
+        scope,
+        replacement_mode,
+        remove_track_changes,
+        strip_media,
+        report_json,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err}");
@@ -242,15 +269,17 @@ fn run_report(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_report(
     files: &FileRegistry,
     mode: SanitizeMode,
     scope: &Scope,
     replacement_mode: ReplacementMode,
     remove_track_changes: bool,
+    strip_media: bool,
     report_json: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    let report: Report = build_report(files, mode, scope, replacement_mode, remove_track_changes)
+    let report: Report = build_report(files, mode, scope, replacement_mode, remove_track_changes, strip_media)
         .map_err(|err| format!("failed to build report: {err}"))?;
     let json = serde_json::to_string_pretty(&report)
         .map_err(|err| format!("failed to serialize report: {err}"))?;

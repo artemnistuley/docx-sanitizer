@@ -12,6 +12,8 @@ use docx_sanitizer::sanitize::{SanitizeResult, sanitize};
 use docx_sanitizer::xml::text::{CANONICAL_HYPERLINK_TARGET, CANONICAL_TIMESTAMP, ReplacementMode};
 use docx_sanitizer::zip::unpack_docx;
 
+const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF];
+
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
 }
@@ -30,6 +32,7 @@ fn strict_mode_blocks_on_customxml() {
         SanitizeMode::Strict,
         &Scope::all(),
         ReplacementMode::PreserveLength,
+        false,
         false,
     )
     .unwrap();
@@ -50,6 +53,7 @@ fn best_effort_sanitizes_known_sensitive_values() {
         SanitizeMode::BestEffort,
         &Scope::all(),
         ReplacementMode::PreserveLength,
+        false,
         false,
     )
     .unwrap()
@@ -111,6 +115,7 @@ fn best_effort_sanitized_part_contents_are_deterministic_across_runs() {
             &Scope::all(),
             ReplacementMode::PreserveLength,
             false,
+            false,
         )
         .unwrap()
         {
@@ -139,6 +144,7 @@ fn narrow_include_scope_still_blocks_strict_mode_on_customxml() {
         &scope,
         ReplacementMode::PreserveLength,
         false,
+        false,
     )
     .unwrap();
 
@@ -154,6 +160,7 @@ fn strict_mode_blocks_on_media() {
         SanitizeMode::Strict,
         &Scope::all(),
         ReplacementMode::PreserveLength,
+        false,
         false,
     )
     .unwrap();
@@ -174,6 +181,7 @@ fn best_effort_sanitizes_metadata_and_passes_media_through_unchanged() {
         SanitizeMode::BestEffort,
         &Scope::all(),
         ReplacementMode::PreserveLength,
+        false,
         false,
     )
     .unwrap()
@@ -215,6 +223,7 @@ fn strict_mode_succeeds_on_a_document_with_only_guaranteed_scope_parts() {
         &Scope::all(),
         ReplacementMode::PreserveLength,
         false,
+        false,
     )
     .unwrap()
     {
@@ -249,6 +258,7 @@ fn strict_mode_sanitizes_comments_and_tracked_changes_while_preserving_structure
         SanitizeMode::Strict,
         &Scope::all(),
         ReplacementMode::PreserveLength,
+        false,
         false,
     )
     .unwrap()
@@ -296,6 +306,7 @@ fn remove_track_changes_collapses_real_document_to_accepted_state() {
         &Scope::all(),
         ReplacementMode::PreserveLength,
         true,
+        false,
     )
     .unwrap()
     {
@@ -311,4 +322,34 @@ fn remove_track_changes_collapses_real_document_to_accepted_state() {
     assert!(!document.contains("<w:ins"), "insert wrapper must be unwrapped");
     assert!(!document.contains("<w:del"), "delete wrapper must be removed entirely");
     assert!(!document.contains("scrambled"), "deleted text must not survive collapse");
+}
+
+#[test]
+fn strip_media_lets_strict_mode_succeed_and_replaces_the_real_image() {
+    // test-doc-2.docx's word/media/image1.jpeg is exactly the case
+    // --strip-media targets: without it, strict mode blocks (see
+    // strict_mode_blocks_on_media above).
+    let files = unpack_fixture("test-doc-2.docx");
+
+    let output = match sanitize(
+        &files,
+        SanitizeMode::Strict,
+        &Scope::all(),
+        ReplacementMode::PreserveLength,
+        false,
+        true,
+    )
+    .unwrap()
+    {
+        SanitizeResult::Produced(output) => output,
+        SanitizeResult::Blocked { concerns } => {
+            panic!("expected --strip-media to let strict mode succeed, got concerns: {concerns:?}")
+        }
+    };
+
+    let sanitized = unpack_docx(Cursor::new(output.bytes)).unwrap();
+    let placeholder = &sanitized["word/media/image1.jpeg"];
+
+    assert_ne!(placeholder, &files["word/media/image1.jpeg"]);
+    assert_eq!(&placeholder[..3], JPEG_MAGIC, "placeholder must still be a valid JPEG");
 }

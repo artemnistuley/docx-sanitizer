@@ -38,8 +38,9 @@
 use std::collections::HashSet;
 
 use crate::Error;
-use crate::part::{ClassifiedPart, SupportTier};
+use crate::part::{ClassifiedPart, PartKind, SupportTier};
 use crate::report::UnsupportedPayload;
+use crate::xml::media::placeholder_bytes_for;
 
 /// A togglable sanitization category selectable via `--include`/`--exclude`.
 ///
@@ -158,13 +159,25 @@ pub enum SanitizeMode {
 /// Collect every unsupported-content concern for a sanitize run: unsupported
 /// part classes present in the package, plus unsupported payload surfaces
 /// found while sanitizing supported parts (e.g. unrecognized `w:instrText`).
+///
+/// `strip_media`: when set, a `Media` part with a supported placeholder
+/// extension (see [`crate::xml::media`]) is not reported as a concern --
+/// its bytes are replaced with a placeholder rather than left as
+/// unsupported content. A `Media` part whose extension has no placeholder
+/// (e.g. `.emf`) is still a concern even with `strip_media` set.
 pub fn collect_concerns(
     parts: &[ClassifiedPart],
     payload_findings: &[UnsupportedPayload],
+    strip_media: bool,
 ) -> Vec<UnsupportedPayload> {
     let mut concerns: Vec<UnsupportedPayload> = parts
         .iter()
         .filter(|part| part.tier == SupportTier::Unsupported)
+        .filter(|part| {
+            !(strip_media
+                && part.kind == PartKind::Media
+                && placeholder_bytes_for(&part.path).is_some())
+        })
         .map(|part| UnsupportedPayload {
             part: part.path.clone(),
             description: format!("unsupported part class: {}", part.kind),
@@ -256,7 +269,7 @@ mod tests {
             part("word/media/image1.png", PartKind::Media, SupportTier::Unsupported),
         ];
 
-        let concerns = collect_concerns(&parts, &[]);
+        let concerns = collect_concerns(&parts, &[], false);
 
         assert_eq!(concerns.len(), 2);
         assert!(concerns.iter().any(|c| c.part == "customXml/item1.xml"));
@@ -275,7 +288,7 @@ mod tests {
             description: "unrecognized w:instrText field instruction: MERGEFIELD".to_string(),
         }];
 
-        let concerns = collect_concerns(&parts, &findings);
+        let concerns = collect_concerns(&parts, &findings, false);
 
         assert_eq!(concerns.len(), 1);
         assert_eq!(concerns[0].part, "word/document.xml");
@@ -289,7 +302,30 @@ mod tests {
             SupportTier::Guaranteed,
         )];
 
-        assert!(collect_concerns(&parts, &[]).is_empty());
+        assert!(collect_concerns(&parts, &[], false).is_empty());
+    }
+
+    #[test]
+    fn strip_media_excludes_media_with_supported_extension_from_concerns() {
+        let parts = vec![
+            part("customXml/item1.xml", PartKind::CustomXml, SupportTier::Unsupported),
+            part("word/media/image1.png", PartKind::Media, SupportTier::Unsupported),
+        ];
+
+        let concerns = collect_concerns(&parts, &[], true);
+
+        assert_eq!(concerns.len(), 1);
+        assert_eq!(concerns[0].part, "customXml/item1.xml");
+    }
+
+    #[test]
+    fn strip_media_still_flags_media_with_unsupported_extension() {
+        let parts = vec![part("word/media/image1.emf", PartKind::Media, SupportTier::Unsupported)];
+
+        let concerns = collect_concerns(&parts, &[], true);
+
+        assert_eq!(concerns.len(), 1);
+        assert_eq!(concerns[0].part, "word/media/image1.emf");
     }
 
     #[test]

@@ -82,12 +82,14 @@ These flags are shared by `sanitize` and `report`:
 | `--exclude <categories>` | Sanitize every category except these. Conflicts with `--include`. |
 | `--mode <mode>` | Replacement strategy for visible/revision text (`w:t`/`w:delText`): `preserve-length` (default), `constant`, or `clear`. Does not affect author/initials/date or document properties, which have their own fixed canonical replacements. |
 | `--remove-track-changes` | Collapse tracked changes to their accepted state before sanitizing (deleted text removed, inserted text kept and unwrapped). Off by default — track-changes structure is preserved. |
+| `--strip-media` | Replace `word/media/*` images with a fixed placeholder instead of leaving them as unsupported content. Only `png`/`jpg`/`jpeg`/`gif`/`bmp` are covered; other formats (e.g. `emf`/`wmf`) remain unsupported regardless. Works independently of `--best-effort` — with this flag, strict mode no longer blocks on media with a supported extension. |
 
 Note: unsupported *part classes* (`word/customXml/`, `word/media/`,
 `word/embeddings/`) are not part of the `--include`/`--exclude` vocabulary —
-their presence always blocks strict mode regardless of scope. Only
-`--best-effort` allows producing output despite them (leaving that content
-untouched in the output).
+their presence always blocks strict mode regardless of scope. `--best-effort`
+allows producing output despite them (leaving that content untouched);
+`--strip-media` specifically resolves `word/media/*` by replacing it rather
+than leaving it untouched or requiring `--best-effort`.
 
 ### Examples
 
@@ -106,6 +108,9 @@ docx-sanitizer sanitize input.docx --output output.docx --mode constant
 
 # Collapse tracked changes to their accepted state first
 docx-sanitizer sanitize input.docx --output output.docx --remove-track-changes
+
+# Replace images with a placeholder instead of blocking strict mode on them
+docx-sanitizer sanitize input.docx --output output.docx --strip-media
 
 # Check what would happen without writing a file
 docx-sanitizer report input.docx --report-json report.json
