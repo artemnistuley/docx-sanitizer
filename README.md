@@ -11,6 +11,22 @@ underlying XML at the byte-span level: only the payload ranges it recognizes
 are replaced, everything else (attribute order, whitespace, entity encoding,
 self-closing tag style) is copied through unchanged.
 
+## Why
+
+Problematic Word documents often need to leave the organization that owns
+them — for customer support investigations, parser/rendering bug reports, or
+regression fixtures — but can't be shared as-is because they contain
+confidential text, metadata, comments, revision history, or embedded
+business data.
+
+The usual workarounds are slow and lossy: manually deleting content,
+rebuilding a minimal example by hand, or copying visible text into a new
+file. Each of these tends to destroy the very structure needed to reproduce
+the original issue. `docx-sanitizer` automates producing a structurally
+faithful, confidentiality-safe artifact instead — safe to attach to a ticket
+or send to a vendor, while still exercising the same parser/renderer code
+paths as the original.
+
 ## Installation
 
 Install from crates.io:
