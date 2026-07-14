@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "docx-sanitizer"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
  "quick-xml",
