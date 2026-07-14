@@ -7,7 +7,7 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use docx_sanitizer::policy::{SanitizeMode, Scope};
+use docx_sanitizer::policy::{SanitizeMode, SanitizePolicy, Scope};
 use docx_sanitizer::sanitize::{SanitizeResult, sanitize};
 use docx_sanitizer::xml::text::{CANONICAL_HYPERLINK_TARGET, CANONICAL_TIMESTAMP, ReplacementMode};
 use docx_sanitizer::zip::unpack_docx;
@@ -32,8 +32,7 @@ fn strict_mode_blocks_on_customxml() {
         SanitizeMode::Strict,
         &Scope::all(),
         ReplacementMode::PreserveLength,
-        false,
-        false,
+        SanitizePolicy::default(),
     )
     .unwrap();
 
@@ -53,8 +52,7 @@ fn best_effort_sanitizes_known_sensitive_values() {
         SanitizeMode::BestEffort,
         &Scope::all(),
         ReplacementMode::PreserveLength,
-        false,
-        false,
+        SanitizePolicy::default(),
     )
     .unwrap()
     {
@@ -114,8 +112,7 @@ fn best_effort_sanitized_part_contents_are_deterministic_across_runs() {
             SanitizeMode::BestEffort,
             &Scope::all(),
             ReplacementMode::PreserveLength,
-            false,
-            false,
+            SanitizePolicy::default(),
         )
         .unwrap()
         {
@@ -143,8 +140,7 @@ fn narrow_include_scope_still_blocks_strict_mode_on_customxml() {
         SanitizeMode::Strict,
         &scope,
         ReplacementMode::PreserveLength,
-        false,
-        false,
+        SanitizePolicy::default(),
     )
     .unwrap();
 
@@ -160,8 +156,7 @@ fn strict_mode_blocks_on_media() {
         SanitizeMode::Strict,
         &Scope::all(),
         ReplacementMode::PreserveLength,
-        false,
-        false,
+        SanitizePolicy::default(),
     )
     .unwrap();
 
@@ -181,8 +176,7 @@ fn best_effort_sanitizes_metadata_and_passes_media_through_unchanged() {
         SanitizeMode::BestEffort,
         &Scope::all(),
         ReplacementMode::PreserveLength,
-        false,
-        false,
+        SanitizePolicy::default(),
     )
     .unwrap()
     {
@@ -222,8 +216,7 @@ fn strict_mode_succeeds_on_a_document_with_only_guaranteed_scope_parts() {
         SanitizeMode::Strict,
         &Scope::all(),
         ReplacementMode::PreserveLength,
-        false,
-        false,
+        SanitizePolicy::default(),
     )
     .unwrap()
     {
@@ -258,8 +251,7 @@ fn strict_mode_sanitizes_comments_and_tracked_changes_while_preserving_structure
         SanitizeMode::Strict,
         &Scope::all(),
         ReplacementMode::PreserveLength,
-        false,
-        false,
+        SanitizePolicy::default(),
     )
     .unwrap()
     {
@@ -305,8 +297,7 @@ fn remove_track_changes_collapses_real_document_to_accepted_state() {
         SanitizeMode::Strict,
         &Scope::all(),
         ReplacementMode::PreserveLength,
-        true,
-        false,
+        SanitizePolicy { remove_track_changes: true, ..Default::default() },
     )
     .unwrap()
     {
@@ -336,8 +327,7 @@ fn strip_media_lets_strict_mode_succeed_and_replaces_the_real_image() {
         SanitizeMode::Strict,
         &Scope::all(),
         ReplacementMode::PreserveLength,
-        false,
-        true,
+        SanitizePolicy { strip_media: true, ..Default::default() },
     )
     .unwrap()
     {
@@ -352,4 +342,53 @@ fn strip_media_lets_strict_mode_succeed_and_replaces_the_real_image() {
 
     assert_ne!(placeholder, &files["word/media/image1.jpeg"]);
     assert_eq!(&placeholder[..3], JPEG_MAGIC, "placeholder must still be a valid JPEG");
+}
+
+#[test]
+fn sanitize_customxml_lets_strict_mode_succeed_and_rewrites_the_leaked_blob() {
+    // test-doc.docx's customXml/item1.xml contains a base64-encoded
+    // protobuf blob (Google Docs roundtrip data) with real document text
+    // and a synthetic username embedded in it -- exactly the case
+    // --sanitize-customxml targets. Without it, strict mode blocks (see
+    // strict_mode_blocks_on_customxml above).
+    let files = unpack_fixture("test-doc.docx");
+
+    let output = match sanitize(
+        &files,
+        SanitizeMode::Strict,
+        &Scope::all(),
+        ReplacementMode::PreserveLength,
+        SanitizePolicy { sanitize_customxml: true, ..Default::default() },
+    )
+    .unwrap()
+    {
+        SanitizeResult::Produced(output) => output,
+        SanitizeResult::Blocked { concerns } => {
+            panic!("expected --sanitize-customxml to let strict mode succeed, got concerns: {concerns:?}")
+        }
+    };
+
+    let sanitized = unpack_docx(Cursor::new(output.bytes)).unwrap();
+    let sanitized_item1 = &sanitized["customXml/item1.xml"];
+
+    assert_ne!(
+        sanitized_item1, &files["customXml/item1.xml"],
+        "the base64 blob text node must be rewritten"
+    );
+    // Structure (root element, schema-identifying attributes) survives --
+    // only text-node payload was touched.
+    let sanitized_str = std::str::from_utf8(sanitized_item1).unwrap();
+    assert!(sanitized_str.contains("go:gDocsCustomXmlDataStorage"));
+    assert!(sanitized_str.contains(r#"uri="GoogleDocsCustomDataVersion2""#));
+
+    // itemProps1.xml has no free-text nodes at all (schema refs are
+    // entirely attributes), so it's untouched.
+    assert_eq!(
+        sanitized["customXml/itemProps1.xml"],
+        files["customXml/itemProps1.xml"]
+    );
+
+    // The rest of the document is still sanitized as normal.
+    let core_props = std::str::from_utf8(&sanitized["docProps/core.xml"]).unwrap();
+    assert!(!core_props.contains("Chris Crawford"));
 }

@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use docx_sanitizer::part::{ClassifiedPart, inspect_parts};
-use docx_sanitizer::policy::{SanitizeMode, Scope};
+use docx_sanitizer::policy::{SanitizeMode, SanitizePolicy, Scope};
 use docx_sanitizer::relationships::Relationships;
 use docx_sanitizer::report::Report;
 use docx_sanitizer::sanitize::{SanitizeResult, report as build_report, sanitize};
@@ -51,6 +51,13 @@ struct PolicyArgs {
     /// no longer blocks on media with a supported extension.
     #[arg(long)]
     strip_media: bool,
+    /// Replace text-node payload in word/customXml/* parts in place,
+    /// regardless of schema, instead of leaving them as unsupported
+    /// content. Text alongside a child element (mixed content) is left
+    /// untouched and still blocks strict mode if found. Works
+    /// independently of --best-effort.
+    #[arg(long)]
+    sanitize_customxml: bool,
 }
 
 impl PolicyArgs {
@@ -69,6 +76,14 @@ impl PolicyArgs {
 
     fn replacement_mode(&self) -> Result<ReplacementMode, String> {
         ReplacementMode::parse(&self.mode).map_err(|err| err.to_string())
+    }
+
+    fn sanitize_policy(&self) -> SanitizePolicy {
+        SanitizePolicy {
+            remove_track_changes: self.remove_track_changes,
+            strip_media: self.strip_media,
+            sanitize_customxml: self.sanitize_customxml,
+        }
     }
 }
 
@@ -117,8 +132,7 @@ fn main() -> ExitCode {
                 mode,
                 &scope,
                 replacement_mode,
-                policy.remove_track_changes,
-                policy.strip_media,
+                policy.sanitize_policy(),
                 report_json.as_deref(),
             )
         }
@@ -135,8 +149,7 @@ fn main() -> ExitCode {
                 mode,
                 &scope,
                 replacement_mode,
-                policy.remove_track_changes,
-                policy.strip_media,
+                policy.sanitize_policy(),
                 report_json.as_deref(),
             )
         }
@@ -168,15 +181,13 @@ fn run_inspect(input: &PathBuf) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_sanitize(
     input: &PathBuf,
     output: &PathBuf,
     mode: SanitizeMode,
     scope: &Scope,
     replacement_mode: ReplacementMode,
-    remove_track_changes: bool,
-    strip_media: bool,
+    policy: SanitizePolicy,
     report_json: Option<&std::path::Path>,
 ) -> ExitCode {
     let files = match open_and_unpack(input) {
@@ -188,21 +199,13 @@ fn run_sanitize(
     };
 
     if let Some(path) = report_json
-        && let Err(err) = write_report(
-            &files,
-            mode,
-            scope,
-            replacement_mode,
-            remove_track_changes,
-            strip_media,
-            Some(path),
-        )
+        && let Err(err) = write_report(&files, mode, scope, replacement_mode, policy, Some(path))
     {
         eprintln!("error: {err}");
         return ExitCode::FAILURE;
     }
 
-    let result = match sanitize(&files, mode, scope, replacement_mode, remove_track_changes, strip_media) {
+    let result = match sanitize(&files, mode, scope, replacement_mode, policy) {
         Ok(result) => result,
         Err(err) => {
             eprintln!("error: failed to sanitize document: {err}");
@@ -234,14 +237,12 @@ fn run_sanitize(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_report(
     input: &PathBuf,
     mode: SanitizeMode,
     scope: &Scope,
     replacement_mode: ReplacementMode,
-    remove_track_changes: bool,
-    strip_media: bool,
+    policy: SanitizePolicy,
     report_json: Option<&std::path::Path>,
 ) -> ExitCode {
     let files = match open_and_unpack(input) {
@@ -252,15 +253,7 @@ fn run_report(
         }
     };
 
-    match write_report(
-        &files,
-        mode,
-        scope,
-        replacement_mode,
-        remove_track_changes,
-        strip_media,
-        report_json,
-    ) {
+    match write_report(&files, mode, scope, replacement_mode, policy, report_json) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err}");
@@ -269,17 +262,15 @@ fn run_report(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn write_report(
     files: &FileRegistry,
     mode: SanitizeMode,
     scope: &Scope,
     replacement_mode: ReplacementMode,
-    remove_track_changes: bool,
-    strip_media: bool,
+    policy: SanitizePolicy,
     report_json: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    let report: Report = build_report(files, mode, scope, replacement_mode, remove_track_changes, strip_media)
+    let report: Report = build_report(files, mode, scope, replacement_mode, policy)
         .map_err(|err| format!("failed to build report: {err}"))?;
     let json = serde_json::to_string_pretty(&report)
         .map_err(|err| format!("failed to serialize report: {err}"))?;
